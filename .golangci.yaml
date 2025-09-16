@@ -1,0 +1,39 @@
+version: "2"
+linters:
+  enable:
+    - staticcheck
+    - govet
+    - revive
+    - gocritic
+    - gosec
+    - errcheck
+    - wastedassign
+    - sloglint
+    - reassign
+  settings:
+    revive:
+      severity: error
+      confidence: 1
+      rules:
+        - name: comments-density
+          arguments: [15]
+          exclude: ["**/*_test.go"]      
+        - name: cyclomatic
+          arguments: [15]
+        - name: max-control-nesting
+          arguments: [5]
+        - name: function-length
+          arguments: [20,100]
+    gocritic:
+      enable-all: true
+
+run:
+  timeout: "5m"
+  issues-exit-code: 1
+  tests: true
+  allow-parallel-runners: true
+
+output:
+  show-stats: true
+
+      
