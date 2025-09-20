@@ -1,3 +1,4 @@
+// Package ui provides a TUI explorer for RabbitMQ topology.
 package ui
 
 import (
@@ -11,8 +12,6 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
-
-// Package main provides a TUI explorer for RabbitMQ topology.
 
 // Explorer is the main struct representing the interactive TUI application
 // for visualizing and exploring RabbitMQ topology.

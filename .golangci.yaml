@@ -17,7 +17,7 @@ linters:
       rules:
         - name: comments-density
           arguments: [15]
-          exclude: ["**/*_test.go"]      
+          exclude: ["**/*_test.go"]
         - name: cyclomatic
           arguments: [15]
         - name: max-control-nesting
@@ -35,5 +35,3 @@ run:
 
 output:
   show-stats: true
-
-      
