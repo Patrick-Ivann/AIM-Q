@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -11,39 +12,42 @@ import (
 	"github.com/rivo/tview"
 )
 
-// Explorer represents the TUI application.
+// Package main provides a TUI explorer for RabbitMQ topology.
+
+// Explorer is the main struct representing the interactive TUI application
+// for visualizing and exploring RabbitMQ topology.
+//
+// Explorer manages rendering, user navigation, auto-refresh, and detail popups.
+// Fields with uppercase initials are exported for testing or external use.
+//
+// Only one Explorer should be live per TUI session.
 type Explorer struct {
-	App      *tview.Application
-	Pages    *tview.Pages
-	Client   *rabbitmq.Client
-	Opts     cli.Options
-	Topology *rabbitmq.Topology
-	Tree     *tview.TreeView
+	App      *tview.Application // TUI Application instance.
+	Pages    *tview.Pages       // Manages layered views/pages.
+	Client   *rabbitmq.Client   // Used for querying RabbitMQ data.
+	Opts     cli.Options        // Command-line options, typically including URI.
+	Topology *rabbitmq.Topology // Latest snapshot of the full MQ topology graph.
+	Tree     *tview.TreeView    // Main navigation tree for vhosts/exchanges/queues.
 
-	refreshMu sync.Mutex
-
-	SelectedNodePath string
-	ExpandedNodes    map[string]bool
+	refreshMu        sync.Mutex      // Guards reload during auto-refresh.
+	SelectedNodePath string          // Path of current navigation selection.
+	ExpandedNodes    map[string]bool // Maps expanded node texts for sync after refresh.
 }
 
-// StartExplorer runs the TUI app with the given topology.
+// StartExplorer launches the TUI application given a RabbitMQ client and CLI options.
+// Returns a non-nil error if the initial topology fetch fails or on TUI exit/failure.
+//
+// If refreshInterval > 0, live topology refresh is enabled via background goroutine.
 func StartExplorer(client *rabbitmq.Client, opts cli.Options, refreshInterval time.Duration) error {
 	topology, err := client.FetchTopology()
 	if err != nil {
 		return err
 	}
 
-	explorer := &Explorer{
-		App:      tview.NewApplication(),
-		Pages:    tview.NewPages(),
-		Client:   client,
-		Opts:     opts,
-		Topology: topology,
-	}
-
+	explorer := newExplorer(client, opts, topology)
 	explorer.initUI()
 
-	// Start auto-refresh loop
+	// Enable background auto-refresh of topology if requested.
 	if refreshInterval > 0 {
 		go explorer.startAutoRefresh(refreshInterval)
 	}
@@ -51,60 +55,104 @@ func StartExplorer(client *rabbitmq.Client, opts cli.Options, refreshInterval ti
 	return explorer.App.SetRoot(explorer.Pages, true).Run()
 }
 
+// newExplorer allocates and returns a new Explorer instance.
+func newExplorer(client *rabbitmq.Client, opts cli.Options, topology *rabbitmq.Topology) *Explorer {
+	return &Explorer{
+		App:      tview.NewApplication(),
+		Pages:    tview.NewPages(),
+		Client:   client,
+		Opts:     opts,
+		Topology: topology,
+	}
+}
+
+// initUI configures the main navigation and help widgets for the TUI.
 func (e *Explorer) initUI() {
 	e.Tree = e.buildVhostTree()
-	e.Tree.SetBorder(true).SetTitle(" AIM-Q Topology ").SetTitleAlign(tview.AlignLeft)
+	e.Tree.SetBorder(true).
+		SetTitle(" AIM-Q Topology ").
+		SetTitleAlign(tview.AlignLeft)
 
+	// Help text displayed at the bottom of the UI window.
 	helpText := tview.NewTextView().
 		SetText("Arrow keys to navigate, [Enter] to select, [Esc] to quit").
 		SetTextColor(tcell.ColorGray)
 
-	layout := tview.NewFlex().SetDirection(tview.FlexRow).
+	layout := tview.NewFlex().
+		SetDirection(tview.FlexRow).
 		AddItem(e.Tree, 0, 1, true).
 		AddItem(helpText, 1, 1, false)
 
 	e.Pages.AddPage("main", layout, true, true)
 }
 
+// buildVhostTree constructs the hierarchical navigation tree for vhosts,
+// exchanges, and queues mapping the topology fields. Returns a fully
+// configured TreeView, ready for event handlers.
 func (e *Explorer) buildVhostTree() *tview.TreeView {
 	root := tview.NewTreeNode("RabbitMQ Vhosts")
-	tree := tview.NewTreeView().SetRoot(root).SetCurrentNode(root)
+	tree := tview.NewTreeView().
+		SetRoot(root).
+		SetCurrentNode(root)
 
-	vhostMap := map[string]*tview.TreeNode{}
+	// vhostMap avoids duplicate vhost nodes and allows O(1) lookup.
+	vhostMap := e.createVhostNodes(root)
+	e.addExchangeNodes(vhostMap)
+	e.addQueueNodes(vhostMap)
 
+	e.setupTreeHandlers(tree, root)
+	return tree
+}
+
+// createVhostNodes scans the current exchanges and queues to populate top-level vhost nodes.
+// Returns a map from vhost name to their TreeNode, allowing children insertion.
+func (e *Explorer) createVhostNodes(root *tview.TreeNode) map[string]*tview.TreeNode {
+	vhostMap := make(map[string]*tview.TreeNode)
 	for _, ex := range e.Topology.Exchanges {
 		if _, ok := vhostMap[ex.Vhost]; !ok {
 			vhostNode := tview.NewTreeNode(fmt.Sprintf("🐰 Vhost: %s", ex.Vhost)).SetExpanded(false)
 			vhostMap[ex.Vhost] = vhostNode
 			root.AddChild(vhostNode)
 		}
-		exNode := tview.NewTreeNode(fmt.Sprintf("🔁 Exchange: %s (%s)", ex.Name, ex.Type)).
-			SetReference(&ex).
-			SetExpanded(false).
-			SetSelectable(true)
-		vhostMap[ex.Vhost].AddChild(exNode)
 	}
-
 	for _, q := range e.Topology.Queues {
 		if _, ok := vhostMap[q.Vhost]; !ok {
 			vhostNode := tview.NewTreeNode(fmt.Sprintf("🐰 Vhost: %s", q.Vhost)).SetExpanded(false)
 			vhostMap[q.Vhost] = vhostNode
 			root.AddChild(vhostNode)
 		}
+	}
+	return vhostMap
+}
+
+// addExchangeNodes inserts Exchange children beneath their parent vhost nodes.
+func (e *Explorer) addExchangeNodes(vhostMap map[string]*tview.TreeNode) {
+	for _, ex := range e.Topology.Exchanges {
+		exNode := tview.NewTreeNode(fmt.Sprintf("🔁 Exchange: %s (%s)", ex.Name, ex.Type)).
+			SetReference(&ex).SetExpanded(false).SetSelectable(true)
+		vhostMap[ex.Vhost].AddChild(exNode)
+	}
+}
+
+// addQueueNodes inserts Queue children beneath their parent vhost nodes.
+func (e *Explorer) addQueueNodes(vhostMap map[string]*tview.TreeNode) {
+	for _, q := range e.Topology.Queues {
 		qNode := tview.NewTreeNode(fmt.Sprintf("📦 Queue: %s", q.Name)).
-			SetReference(&q).
-			SetExpanded(false).
-			SetSelectable(true)
+			SetReference(&q).SetExpanded(false).SetSelectable(true)
 		vhostMap[q.Vhost].AddChild(qNode)
 	}
+}
 
+// setupTreeHandlers wires navigation and keyboard input handlers for the tree.
+func (e *Explorer) setupTreeHandlers(tree *tview.TreeView, root *tview.TreeNode) {
 	tree.SetSelectedFunc(func(node *tview.TreeNode) {
 		ref := node.GetReference()
 		if ref == nil {
-			node.SetExpanded(!node.IsExpanded()) // toggle expansion for vhost node
+			// Vhost node: toggle expansion/collapse.
+			node.SetExpanded(!node.IsExpanded())
 			return
 		}
-
+		// Exchange or Queue node: open details view.
 		switch val := ref.(type) {
 		case *rabbitmq.Exchange:
 			e.showExchangeDetails(val)
@@ -114,8 +162,7 @@ func (e *Explorer) buildVhostTree() *tview.TreeView {
 	})
 
 	tree.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		switch event.Key() {
-		case tcell.KeyEsc:
+		if event.Key() == tcell.KeyEsc {
 			e.App.Stop()
 			return nil
 		}
@@ -123,11 +170,28 @@ func (e *Explorer) buildVhostTree() *tview.TreeView {
 	})
 
 	tree.SetCurrentNode(root)
-
-	return tree
 }
 
+// showExchangeDetails shows a modal with full Exchange details.
 func (e *Explorer) showExchangeDetails(ex *rabbitmq.Exchange) {
+	text := e.formatExchangeDetails(ex)
+	modal := e.buildModal(text)
+
+	// Modal closes with Esc, returns to main page.
+	modal.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEsc {
+			e.Pages.SwitchToPage("main")
+			return nil
+		}
+		return event
+	})
+
+	e.Pages.AddAndSwitchToPage("details", modal, true)
+	e.App.SetFocus(text)
+}
+
+// formatExchangeDetails produces a text description for the Exchange, including its bindings.
+func (e *Explorer) formatExchangeDetails(ex *rabbitmq.Exchange) *tview.TextView {
 	text := tview.NewTextView().SetDynamicColors(true).SetTextAlign(tview.AlignLeft)
 	fmt.Fprintf(text, "[::b]Exchange:[-:-] %s\n", ex.Name)
 	fmt.Fprintf(text, "Type: %s\nDurable: %v\nAuto-Delete: %v\n", ex.Type, ex.Durable, ex.AutoDelete)
@@ -135,17 +199,20 @@ func (e *Explorer) showExchangeDetails(ex *rabbitmq.Exchange) {
 	fmt.Fprintln(text, "\nBindings:")
 	for _, b := range e.Topology.Bindings {
 		if b.Source == ex.Name && b.Vhost == ex.Vhost {
-			count := "" // or derive from queue stats
+			count := "" // Add live queue/stat integration here.
 			fmt.Fprintf(text, "  ➤ %s → %s (%s) [key: %s]%s\n",
 				b.Source, b.Destination, b.DestType, b.RoutingKey, count)
 		}
 	}
 
 	text.SetBorder(true).SetTitle(fmt.Sprintf(" Exchange: %s ", ex.Name))
+	return text
+}
 
-	modal := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(text, 0, 1, true).
-		AddItem(e.modalFooter(), 1, 0, false)
+// showQueueDetails visualizes all details and bindings for a queue node.
+func (e *Explorer) showQueueDetails(q *rabbitmq.Queue) {
+	text := e.formatQueueDetails(q)
+	modal := e.buildModal(text)
 
 	modal.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyEsc {
@@ -159,7 +226,8 @@ func (e *Explorer) showExchangeDetails(ex *rabbitmq.Exchange) {
 	e.App.SetFocus(text)
 }
 
-func (e *Explorer) showQueueDetails(q *rabbitmq.Queue) {
+// formatQueueDetails produces a text description of Queue stats, bindings, and consumers.
+func (e *Explorer) formatQueueDetails(q *rabbitmq.Queue) *tview.TextView {
 	text := tview.NewTextView().SetDynamicColors(true).SetTextAlign(tview.AlignLeft)
 
 	fmt.Fprintf(text, "[::b]Queue:[-:-] %s\n", q.Name)
@@ -171,7 +239,7 @@ func (e *Explorer) showQueueDetails(q *rabbitmq.Queue) {
 		fmt.Fprintf(text, "Unacknowledged messages: %v\n", q.MessageStats.MessagesUnacked)
 	}
 
-	// Bindings to this queue
+	// List all queue bindings for this queue.
 	fmt.Fprintln(text, "\nBindings:")
 	for _, b := range e.Topology.Bindings {
 		if b.Destination == q.Name && b.Vhost == q.Vhost && b.DestType == "queue" {
@@ -179,7 +247,7 @@ func (e *Explorer) showQueueDetails(q *rabbitmq.Queue) {
 		}
 	}
 
-	// Consumers
+	// Show all consumers for this queue.
 	fmt.Fprintln(text, "\nConsumers:")
 	for _, c := range e.Topology.Consumers {
 		if c.Queue == q.Name && c.Vhost == q.Vhost {
@@ -188,23 +256,18 @@ func (e *Explorer) showQueueDetails(q *rabbitmq.Queue) {
 	}
 
 	text.SetBorder(true).SetTitle(fmt.Sprintf(" Queue: %s ", q.Name))
-
-	modal := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(text, 0, 1, true).
-		AddItem(e.modalFooter(), 1, 0, false)
-
-	modal.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyEsc {
-			e.Pages.SwitchToPage("main")
-			return nil
-		}
-		return event
-	})
-
-	e.Pages.AddAndSwitchToPage("details", modal, true)
-	e.App.SetFocus(text)
+	return text
 }
 
+// buildModal constructs a modal-flex layout for details popups.
+func (e *Explorer) buildModal(content *tview.TextView) *tview.Flex {
+	return tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(content, 0, 1, true).
+		AddItem(e.modalFooter(), 1, 0, false)
+}
+
+// startAutoRefresh runs periodic topology refresh and updates the UI.
 func (e *Explorer) startAutoRefresh(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -212,9 +275,9 @@ func (e *Explorer) startAutoRefresh(interval time.Duration) {
 	for range ticker.C {
 		newTopo, err := e.Client.FetchTopology()
 		if err != nil {
+			log.Printf("auto-refresh error: %v", err)
 			continue
 		}
-
 		e.refreshMu.Lock()
 		e.Topology = newTopo
 		e.refreshTreeView()
@@ -222,49 +285,49 @@ func (e *Explorer) startAutoRefresh(interval time.Duration) {
 	}
 }
 
+// refreshTreeView safely replaces the vhost tree after a topology update.
+// Current navigation position and expanded nodes are preserved.
 func (e *Explorer) refreshTreeView() {
-	// Capture current selection and expanded nodes before refreshing
 	var selectedText string
 	treeView, ok := e.App.GetFocus().(*tview.TreeView)
-	if ok && treeView != nil {
-		if current := treeView.GetCurrentNode(); current != nil {
-			selectedText = current.GetText()
-		}
+	if ok && treeView != nil && treeView.GetCurrentNode() != nil {
+		selectedText = treeView.GetCurrentNode().GetText()
 		e.ExpandedNodes = collectExpandedNodes(treeView.GetRoot())
 	}
 
-	// Fetch new topology from RabbitMQ
-	client, clientErr := rabbitmq.NewClient(e.Opts.URI)
-	if clientErr != nil {
+	client, err := rabbitmq.NewClient(e.Opts.URI)
+	if err != nil {
+		log.Printf("client init error: %v", err)
 		return
 	}
+
 	newTopology, err := client.FetchTopology()
 	if err != nil {
-		// You might want to log or display this error in the TUI
+		log.Printf("topology error: %v", err)
 		return
 	}
 	e.Topology = newTopology
 
-	// Rebuild the tree and layout
 	newTree := e.buildVhostTree()
 	e.restoreTreeState(newTree, selectedText)
 
-	// Help text
 	helpText := tview.NewTextView().
 		SetText("Arrow keys to navigate, [Enter] to select, [Esc] to quit").
 		SetTextColor(tcell.ColorGray)
 
-	layout := tview.NewFlex().SetDirection(tview.FlexRow).
+	layout := tview.NewFlex().
+		SetDirection(tview.FlexRow).
 		AddItem(newTree, 0, 1, true).
 		AddItem(helpText, 1, 1, false)
 
-	// Replace the page in a safe way
+	// Replace the 'main' page atomically so users never see flicker or partial redraw.
 	e.App.QueueUpdateDraw(func() {
 		e.Pages.RemovePage("main")
 		e.Pages.AddPage("main", layout, true, true)
 	})
 }
 
+// restoreTreeState re-expands tree nodes and restores selection after a UI refresh.
 func (e *Explorer) restoreTreeState(tree *tview.TreeView, selectedText string) {
 	var walk func(node *tview.TreeNode)
 	walk = func(node *tview.TreeNode) {
@@ -272,22 +335,20 @@ func (e *Explorer) restoreTreeState(tree *tview.TreeView, selectedText string) {
 			return
 		}
 		text := node.GetText()
-
 		if e.ExpandedNodes != nil && e.ExpandedNodes[text] {
 			node.SetExpanded(true)
 		}
 		if text == selectedText {
 			tree.SetCurrentNode(node)
 		}
-
 		for _, child := range node.GetChildren() {
 			walk(child)
 		}
 	}
-
 	walk(tree.GetRoot())
 }
 
+// collectExpandedNodes recurses the tree and saves the expanded state of all nodes.
 func collectExpandedNodes(root *tview.TreeNode) map[string]bool {
 	expanded := make(map[string]bool)
 	var walk func(node *tview.TreeNode)
@@ -304,10 +365,10 @@ func collectExpandedNodes(root *tview.TreeNode) map[string]bool {
 	return expanded
 }
 
+// modalFooter provides a consistent UI footer for modal dialogs.
 func (e *Explorer) modalFooter() *tview.TextView {
-	footer := tview.NewTextView().
+	return tview.NewTextView().
 		SetText("[Esc] to go back").
 		SetTextAlign(tview.AlignRight).
 		SetTextColor(tcell.ColorGray)
-	return footer
 }
