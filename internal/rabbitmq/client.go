@@ -18,30 +18,37 @@ import (
 type Client struct {
 	baseURL string        // Base URL of the RabbitMQ management API (e.g., "http://localhost:15672")
 	auth    *url.Userinfo // Authentication info for HTTP basic auth
-	http    *http.Client  // HTTP client used to make API requests
+	Http    HTTPClient    // HTTP client used to make API requests
+}
+
+type HTTPClient interface {
+	Do(*http.Request) (*http.Response, error)
 }
 
 // NewClient constructs a new RabbitMQ management API client from a full URI string.
 //
 // The uri argument should include protocol, host, port, and authentication (e.g., "http://user:password@rabbitmqhost:15672").
 // Returns an error for invalid URIs.
-func NewClient(uri string) (*Client, error) {
+func NewClient(uri string, httpClient HTTPClient) (*Client, error) {
 	parsed, err := url.Parse(uri)
 	if err != nil {
 		return nil, fmt.Errorf("invalid URI: %w", err)
 	}
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
 	return &Client{
 		baseURL: fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host),
 		auth:    parsed.User,
-		http:    http.DefaultClient,
+		Http:    httpClient,
 	}, nil
 }
 
-// get fetches and decodes a JSON response from the given API path into out.
+// Get fetches and decodes a JSON response from the given API path into out.
 //
 // The out argument must be a pointer to a Go type into which the JSON will be unmarshaled.
 // Returns an error if the HTTP request fails, returns a non-200 code, or if JSON decoding fails.
-func (c *Client) get(path string, out interface{}) error {
+func (c *Client) Get(path string, out interface{}) error {
 	reqURL := fmt.Sprintf("%s/api/%s", c.baseURL, path)
 	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
@@ -54,7 +61,7 @@ func (c *Client) get(path string, out interface{}) error {
 		req.SetBasicAuth(c.auth.Username(), pass)
 	}
 
-	resp, err := c.http.Do(req)
+	resp, err := c.Http.Do(req)
 	if err != nil {
 		return fmt.Errorf("HTTP request failed: %w", err)
 	}
@@ -85,16 +92,16 @@ func (c *Client) FetchTopology() (*Topology, error) {
 	)
 
 	// Order is important, as exchanges/queues may be referenced by bindings/consumers.
-	if err := c.get("exchanges", &exchanges); err != nil {
+	if err := c.Get("exchanges", &exchanges); err != nil {
 		return nil, err
 	}
-	if err := c.get("queues", &queues); err != nil {
+	if err := c.Get("queues", &queues); err != nil {
 		return nil, err
 	}
-	if err := c.get("bindings", &bindings); err != nil {
+	if err := c.Get("bindings", &bindings); err != nil {
 		return nil, err
 	}
-	if err := c.get("consumers", &consumers); err != nil {
+	if err := c.Get("consumers", &consumers); err != nil {
 		return nil, err
 	}
 

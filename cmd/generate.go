@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 
 	"github.com/Patrick-Ivann/AIM-Q/internal/cli"
@@ -52,7 +53,7 @@ var generateCmd = &cobra.Command{
 			ShowMsgStats:   showMsgStats,
 		}
 
-		client, clientErr := rabbitmq.NewClient(opts.URI)
+		client, clientErr := rabbitmq.NewClient(opts.URI, http.DefaultClient)
 
 		if clientErr != nil {
 			return fmt.Errorf("connection error to broker : %w", clientErr)

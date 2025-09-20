@@ -21,13 +21,13 @@ import (
 //
 // Only one Explorer should be live per TUI session.
 type Explorer struct {
-	App      *tview.Application // TUI Application instance.
-	Pages    *tview.Pages       // Manages layered views/pages.
-	Client   *rabbitmq.Client   // Used for querying RabbitMQ data.
-	Opts     cli.Options        // Command-line options, typically including URI.
-	Topology *rabbitmq.Topology // Latest snapshot of the full MQ topology graph.
-	Tree     *tview.TreeView    // Main navigation tree for vhosts/exchanges/queues.
-
+	App              *tview.Application // TUI Application instance.
+	Pages            *tview.Pages       // Manages layered views/pages.
+	Client           *rabbitmq.Client   // Used for querying RabbitMQ data.
+	Opts             cli.Options        // Command-line options, typically including URI.
+	Topology         *rabbitmq.Topology // Latest snapshot of the full MQ topology graph.
+	Tree             *tview.TreeView    // Main navigation tree for vhosts/exchanges/queues.
+	HttpClient       *rabbitmq.HTTPClient
 	refreshMu        sync.Mutex      // Guards reload during auto-refresh.
 	SelectedNodePath string          // Path of current navigation selection.
 	ExpandedNodes    map[string]bool // Maps expanded node texts for sync after refresh.
@@ -37,13 +37,13 @@ type Explorer struct {
 // Returns a non-nil error if the initial topology fetch fails or on TUI exit/failure.
 //
 // If refreshInterval > 0, live topology refresh is enabled via background goroutine.
-func StartExplorer(client *rabbitmq.Client, opts cli.Options, refreshInterval time.Duration) error {
+func StartExplorer(client *rabbitmq.Client, opts cli.Options, refreshInterval time.Duration, httpClient *rabbitmq.HTTPClient) error {
 	topology, err := client.FetchTopology()
 	if err != nil {
 		return err
 	}
 
-	explorer := newExplorer(client, opts, topology)
+	explorer := newExplorer(client, opts, topology, httpClient)
 	explorer.initUI()
 
 	// Enable background auto-refresh of topology if requested.
@@ -55,13 +55,14 @@ func StartExplorer(client *rabbitmq.Client, opts cli.Options, refreshInterval ti
 }
 
 // newExplorer allocates and returns a new Explorer instance.
-func newExplorer(client *rabbitmq.Client, opts cli.Options, topology *rabbitmq.Topology) *Explorer {
+func newExplorer(client *rabbitmq.Client, opts cli.Options, topology *rabbitmq.Topology, httpClient *rabbitmq.HTTPClient) *Explorer {
 	return &Explorer{
-		App:      tview.NewApplication(),
-		Pages:    tview.NewPages(),
-		Client:   client,
-		Opts:     opts,
-		Topology: topology,
+		App:        tview.NewApplication(),
+		Pages:      tview.NewPages(),
+		Client:     client,
+		Opts:       opts,
+		Topology:   topology,
+		HttpClient: httpClient,
 	}
 }
 
@@ -294,7 +295,7 @@ func (e *Explorer) refreshTreeView() {
 		e.ExpandedNodes = collectExpandedNodes(treeView.GetRoot())
 	}
 
-	client, err := rabbitmq.NewClient(e.Opts.URI)
+	client, err := rabbitmq.NewClient(e.Opts.URI, *e.HttpClient)
 	if err != nil {
 		log.Printf("client init error: %v", err)
 		return

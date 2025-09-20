@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"net/http"
 	"time"
 
 	"github.com/Patrick-Ivann/AIM-Q/internal/cli"
@@ -18,12 +19,13 @@ var tuiCmd = &cobra.Command{
 	Use:   "tui",
 	Short: "Start interactive TUI for exploring RabbitMQ topology",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client, err := rabbitmq.NewClient(uri)
+		httpClient := http.DefaultClient
+		client, err := rabbitmq.NewClient(uri, httpClient)
 		if err != nil {
 			return err
 		}
 
-		return ui.StartExplorer(client, opts, time.Duration(refreshInterval)*time.Second)
+		return ui.StartExplorer(client, opts, time.Duration(refreshInterval)*time.Second, &client.Http)
 	},
 }
 
