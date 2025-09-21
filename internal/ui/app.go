@@ -21,54 +21,56 @@ import (
 //
 // Only one Explorer should be live per TUI session.
 type Explorer struct {
-	App              *tview.Application // TUI Application instance.
-	Pages            *tview.Pages       // Manages layered views/pages.
-	Client           *rabbitmq.Client   // Used for querying RabbitMQ data.
-	Opts             cli.Options        // Command-line options, typically including URI.
-	Topology         *rabbitmq.Topology // Latest snapshot of the full MQ topology graph.
-	Tree             *tview.TreeView    // Main navigation tree for vhosts/exchanges/queues.
+	App              *tview.Application       // TUI Application instance.
+	Pages            *tview.Pages             // Manages layered views/pages.
+	Client           rabbitmq.ClientInterface // Used for querying RabbitMQ data.
+	Opts             cli.Options              // Command-line options, typically including URI.
+	Topology         *rabbitmq.Topology       // Latest snapshot of the full MQ topology graph.
+	Tree             *tview.TreeView          // Main navigation tree for vhosts/exchanges/queues.
 	HttpClient       *rabbitmq.HTTPClient
 	refreshMu        sync.Mutex      // Guards reload during auto-refresh.
 	SelectedNodePath string          // Path of current navigation selection.
 	ExpandedNodes    map[string]bool // Maps expanded node texts for sync after refresh.
+	stopAutoRefresh  chan struct{}   // channel to signal auto-refresh to stop
 }
 
 // StartExplorer launches the TUI application given a RabbitMQ client and CLI options.
 // Returns a non-nil error if the initial topology fetch fails or on TUI exit/failure.
 //
 // If refreshInterval > 0, live topology refresh is enabled via background goroutine.
-func StartExplorer(client *rabbitmq.Client, opts cli.Options, refreshInterval time.Duration, httpClient *rabbitmq.HTTPClient) error {
+func StartExplorer(client rabbitmq.ClientInterface, opts cli.Options, refreshInterval time.Duration, httpClient *rabbitmq.HTTPClient) error {
 	topology, err := client.FetchTopology()
 	if err != nil {
 		return err
 	}
 
-	explorer := newExplorer(client, opts, topology, httpClient)
-	explorer.initUI()
+	explorer := NewExplorer(client, opts, topology, httpClient)
+	explorer.InitUI()
 
 	// Enable background auto-refresh of topology if requested.
 	if refreshInterval > 0 {
-		go explorer.startAutoRefresh(refreshInterval)
+		go explorer.StartAutoRefresh(refreshInterval)
 	}
 
 	return explorer.App.SetRoot(explorer.Pages, true).Run()
 }
 
-// newExplorer allocates and returns a new Explorer instance.
-func newExplorer(client *rabbitmq.Client, opts cli.Options, topology *rabbitmq.Topology, httpClient *rabbitmq.HTTPClient) *Explorer {
+// NewExplorer allocates and returns a new Explorer instance.
+func NewExplorer(client rabbitmq.ClientInterface, opts cli.Options, topology *rabbitmq.Topology, httpClient *rabbitmq.HTTPClient) *Explorer {
 	return &Explorer{
-		App:        tview.NewApplication(),
-		Pages:      tview.NewPages(),
-		Client:     client,
-		Opts:       opts,
-		Topology:   topology,
-		HttpClient: httpClient,
+		App:             tview.NewApplication(),
+		Pages:           tview.NewPages(),
+		Client:          client,
+		Opts:            opts,
+		Topology:        topology,
+		HttpClient:      httpClient,
+		stopAutoRefresh: make(chan struct{}, 1),
 	}
 }
 
 // initUI configures the main navigation and help widgets for the TUI.
-func (e *Explorer) initUI() {
-	e.Tree = e.buildVhostTree()
+func (e *Explorer) InitUI() {
+	e.Tree = e.BuildVhostTree()
 	e.Tree.SetBorder(true).
 		SetTitle(" AIM-Q Topology ").
 		SetTitleAlign(tview.AlignLeft)
@@ -86,10 +88,10 @@ func (e *Explorer) initUI() {
 	e.Pages.AddPage("main", layout, true, true)
 }
 
-// buildVhostTree constructs the hierarchical navigation tree for vhosts,
+// BuildVhostTree constructs the hierarchical navigation tree for vhosts,
 // exchanges, and queues mapping the topology fields. Returns a fully
 // configured TreeView, ready for event handlers.
-func (e *Explorer) buildVhostTree() *tview.TreeView {
+func (e *Explorer) BuildVhostTree() *tview.TreeView {
 	root := tview.NewTreeNode("RabbitMQ Vhosts")
 	tree := tview.NewTreeView().
 		SetRoot(root).
@@ -264,30 +266,36 @@ func (e *Explorer) buildModal(content *tview.TextView) *tview.Flex {
 	return tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(content, 0, 1, true).
-		AddItem(e.modalFooter(), 1, 0, false)
+		AddItem(e.ModalFooter(), 1, 0, false)
 }
 
-// startAutoRefresh runs periodic topology refresh and updates the UI.
-func (e *Explorer) startAutoRefresh(interval time.Duration) {
+// StartAutoRefresh runs periodic topology refresh and updates the UI.
+func (e *Explorer) StartAutoRefresh(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		newTopo, err := e.Client.FetchTopology()
-		if err != nil {
-			log.Printf("auto-refresh error: %v", err)
-			continue
+	for {
+		select {
+		case <-ticker.C:
+			newTopo, err := e.Client.FetchTopology()
+			if err != nil {
+				log.Printf("auto-refresh error: %v", err)
+				continue
+			}
+			e.refreshMu.Lock()
+			e.Topology = newTopo
+			e.RefreshTreeView()
+			e.refreshMu.Unlock()
+
+		case <-e.stopAutoRefresh:
+			return
 		}
-		e.refreshMu.Lock()
-		e.Topology = newTopo
-		e.refreshTreeView()
-		e.refreshMu.Unlock()
 	}
 }
 
-// refreshTreeView safely replaces the vhost tree after a topology update.
+// RefreshTreeView safely replaces the vhost tree after a topology update.
 // Current navigation position and expanded nodes are preserved.
-func (e *Explorer) refreshTreeView() {
+func (e *Explorer) RefreshTreeView() {
 	var selectedText string
 	treeView, ok := e.App.GetFocus().(*tview.TreeView)
 	if ok && treeView != nil && treeView.GetCurrentNode() != nil {
@@ -295,20 +303,14 @@ func (e *Explorer) refreshTreeView() {
 		e.ExpandedNodes = collectExpandedNodes(treeView.GetRoot())
 	}
 
-	client, err := rabbitmq.NewClient(e.Opts.URI, *e.HttpClient)
-	if err != nil {
-		log.Printf("client init error: %v", err)
-		return
-	}
-
-	newTopology, err := client.FetchTopology()
+	newTopology, err := e.Client.FetchTopology()
 	if err != nil {
 		log.Printf("topology error: %v", err)
 		return
 	}
 	e.Topology = newTopology
 
-	newTree := e.buildVhostTree()
+	newTree := e.BuildVhostTree()
 	e.restoreTreeState(newTree, selectedText)
 
 	helpText := tview.NewTextView().
@@ -365,10 +367,17 @@ func collectExpandedNodes(root *tview.TreeNode) map[string]bool {
 	return expanded
 }
 
-// modalFooter provides a consistent UI footer for modal dialogs.
-func (e *Explorer) modalFooter() *tview.TextView {
+// ModalFooter provides a consistent UI footer for modal dialogs.
+func (e *Explorer) ModalFooter() *tview.TextView {
 	return tview.NewTextView().
 		SetText("[Esc] to go back").
 		SetTextAlign(tview.AlignRight).
 		SetTextColor(tcell.ColorGray)
+}
+
+func (e *Explorer) StopAutoRefresh() {
+	select {
+	case e.stopAutoRefresh <- struct{}{}:
+	default:
+	}
 }

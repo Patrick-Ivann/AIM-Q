@@ -25,6 +25,11 @@ type HTTPClient interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
+type ClientInterface interface {
+	FetchTopology() (*Topology, error)
+	Get(path string, out interface{}) error
+}
+
 // NewClient constructs a new RabbitMQ management API client from a full URI string.
 //
 // The uri argument should include protocol, host, port, and authentication (e.g., "http://user:password@rabbitmqhost:15672").
