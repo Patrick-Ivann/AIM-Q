@@ -1,7 +1,12 @@
 package cmd
 
 import (
+	"context"
+	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/Patrick-Ivann/AIM-Q/internal/cli"
@@ -19,13 +24,27 @@ var tuiCmd = &cobra.Command{
 	Use:   "tui",
 	Short: "Start interactive TUI for exploring RabbitMQ topology",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Context and signal handling
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+		go func() {
+			<-sigChan
+			log.Println("Received SIGINT, shutting down TUI...")
+			cancel()
+		}()
+
 		httpClient := http.DefaultClient
 		client, err := rabbitmq.NewClient(uri, httpClient)
 		if err != nil {
 			return err
 		}
-
-		return ui.StartExplorer(client, opts, time.Duration(refreshInterval)*time.Second, &client.Http)
+		vm := ui.NewViewModel(client)
+		explorer := ui.NewExplorer(vm)
+		return explorer.Start(ctx, 5*time.Second)
 	},
 }
 
