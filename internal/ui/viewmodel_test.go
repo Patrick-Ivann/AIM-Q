@@ -3,9 +3,38 @@ package ui_test
 import (
 	"testing"
 
+	"github.com/Patrick-Ivann/AIM-Q/internal/rabbitmq"
 	"github.com/Patrick-Ivann/AIM-Q/internal/ui"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 )
+
+// Mock rabbitmq.Client supporting FetchTopology call.
+type MockClient struct {
+	mock.Mock
+}
+
+func (m *MockClient) FetchTopology() (*rabbitmq.Topology, error) {
+	args := m.Called()
+	return args.Get(0).(*rabbitmq.Topology), args.Error(1)
+}
+
+func (m *MockClient) Get(path string, out interface{}) error {
+	args := m.Called(path, out)
+	return args.Error(0)
+}
+
+// Provide a minimal valid topology for tests.
+func MinimalTopology() *rabbitmq.Topology {
+	return &rabbitmq.Topology{
+		Exchanges: []rabbitmq.Exchange{{Name: "ex1", Type: "direct", Vhost: "vh1"}, {Name: "ex1", Type: "topic", Vhost: "/"}},
+		Queues:    []rabbitmq.Queue{{Name: "q1", Vhost: "vh1"}},
+		Bindings:  []rabbitmq.Binding{{Source: "ex1", Destination: "q1", DestType: "queue", Vhost: "vh1"}},
+		Consumers: []rabbitmq.Consumer{{Queue: "q1", Vhost: "vh1", ConsumerTag: "consumer1", ChannelDetail: struct {
+			PID int "json:\"pid\""
+		}{PID: 667}}},
+	}
+}
 
 func TestBuildTreeData(t *testing.T) {
 	mockClient := &MockClient{}
