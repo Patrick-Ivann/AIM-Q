@@ -4,3 +4,6 @@
 
 Purpose:
 Track, visualize, and inspect RabbitMQ topology in real time — exchanges, bindings, queues, consumers, and message flows — as both static diagrams and an interactive terminal interface.
+
+go run main.go generate  --uri http://
+go run main.go tui  --uri http:// --message-stats
